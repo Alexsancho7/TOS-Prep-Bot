@@ -1,0 +1,94 @@
+import logging
+import datetime
+import gspread
+import os
+from oauth2client.service_account import ServiceAccountCredentials
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatMemberHandler
+
+# === ЛОГИ ===
+logging.basicConfig(level=logging.INFO)
+
+# === НАСТРОЙКИ ===
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "ТУТ_ТОКЕН_БЕЗ_КАВЫЧЕК"
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME") or "ТУТ_НАЗВАНИЕ_ТАБЛИЦЫ"
+AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID") or 123456789)  # Вставь свой Telegram ID
+CREDENTIALS_FILE = "creds.json"
+
+# === ДОСТУП К GOOGLE SHEETS ===
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+gs_client = gspread.authorize(creds)
+sheet = gs_client.open(GOOGLE_SHEET_NAME).sheet1
+
+# === СОХРАНЕНИЕ ЧАТА ===
+def save_chat(chat):
+    chat_id = chat.id
+    title = chat.title or f"Chat {chat_id}"
+    rows = sheet.get_all_records()
+    if any(str(chat_id) == str(row['Chat ID']) for row in rows):
+        logging.info(f"Чат уже есть: {chat_id}")
+        return
+    sheet.append_row([title, str(chat_id), datetime.datetime.now().strftime("%Y-%m-%d")])
+    logging.info(f"Сохранён чат: {chat_id} - {title}")
+
+# === КОМАНДА /send ===
+async def send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != AUTHORIZED_USER_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+
+    message = ' '.join(context.args)
+    if not message:
+        await update.message.reply_text("Используй: /send текст")
+        return
+
+    rows = sheet.get_all_records()
+    sent = 0
+    for row in rows:
+        try:
+            await context.bot.send_message(chat_id=int(row['Chat ID']), text=message)
+            sent += 1
+        except Exception as e:
+            logging.warning(f"Ошибка в {row['Chat ID']}: {e}")
+
+    await update.message.reply_text(f"Отправлено в {sent} чатов.")
+
+# === ХЕНДЛЕР НА ДОБАВЛЕНИЕ В ЧАТ ===
+async def chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.chat_member is None:
+        logging.warning("update.chat_member is None")
+        return
+    member = update.chat_member.new_chat_member
+    if member.user.id == context.bot.id:
+        chat = update.effective_chat
+        logging.info(f"Бот добавлен в чат: {chat.title} ({chat.id})")
+        save_chat(chat)
+
+# === КОМАНДА /save — вручную записать чат ===
+async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    logging.info(f"Команда /save от: {chat.title} ({chat.id})")
+    save_chat(chat)
+    await update.message.reply_text("Попытка сохранить чат в таблицу.")
+
+# === КОМАНДА /info — узнать тип чата ===
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    await update.message.reply_text(f"Тип чата: {chat.type}\nID: {chat.id}\nНазвание: {chat.title}")
+
+# === КОМАНДА /start — узнать свой Telegram ID ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"Твой Telegram ID: {user_id}")
+
+# === ЗАПУСК ===
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(ChatMemberHandler(chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+app.add_handler(CommandHandler("send", send))
+app.add_handler(CommandHandler("save", save_command))
+app.add_handler(CommandHandler("info", info))
+app.add_handler(CommandHandler("start", start))
+
+print("Бот запущен")
+app.run_polling()
